@@ -1,0 +1,126 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Заявка получена — B2B</title>
+  <meta name="description" content="Заявка получена. Менеджер отправит наличие и условия поставки." />
+  <meta name="theme-color" content="#2f63e6" />
+  <meta name="robots" content="noindex, nofollow" />
+
+  <script>document.documentElement.classList.add('js');</script>
+
+  <!-- ============================================================
+       АНАЛИТИКА. Все события идут через trackEvent() (script.js).
+       Базовые коды счётчиков — ниже; заменить нужно только ID.
+       thank-you.html: view_thank_you, click_telegram  (страница конверсии)
+       ============================================================ -->
+
+  <!-- ===== META PIXEL ===== замените ВАШ_PIXEL_ID (одно место). -->
+  <script>
+    window.META_PIXEL_ID = "ВАШ_PIXEL_ID"; /* ← вставьте свой Pixel ID */
+    (function () {
+      var id = window.META_PIXEL_ID;
+      if (!id || id === "ВАШ_PIXEL_ID") return; /* ID не задан — пиксель не грузим, сайт работает */
+      !function (f, b, e, v, n, t, s) {
+        if (f.fbq) return; n = f.fbq = function () { n.callMethod ? n.callMethod.apply(n, arguments) : n.queue.push(arguments) };
+        if (!f._fbq) f._fbq = n; n.push = n; n.loaded = !0; n.version = "2.0"; n.queue = [];
+        t = b.createElement(e); t.async = !0; t.src = v; s = b.getElementsByTagName(e)[0];
+        s.parentNode.insertBefore(t, s);
+      }(window, document, "script", "https://connect.facebook.net/en_US/fbevents.js");
+      fbq("init", id); /* PageView и остальные события отправляет trackEvent() */
+    })();
+  </script>
+
+  <!-- ===== GOOGLE TAG (gtag.js) — по желанию: раскомментируйте и вставьте G-XXXXXXX =====
+  <script async src="https://www.googletagmanager.com/gtag/js?id=G-XXXXXXX"></script>
+  <script>window.dataLayer=window.dataLayer||[];function gtag(){dataLayer.push(arguments);}
+    gtag('js', new Date()); gtag('config', 'G-XXXXXXX');</script>
+  ===== -->
+
+  <!-- ===== ЯНДЕКС.МЕТРИКА — по желанию: вставьте код счётчика и укажите его номер в YM_COUNTER_ID (script.js). ===== -->
+
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="styles.css" />
+  <script src="script.js" defer></script>
+</head>
+<body data-page="thank-you">
+
+  <!-- ===== Шапка ===== -->
+  <header class="site-header">
+    <div class="container site-header__inner">
+      <a class="brand" href="index.html" aria-label="На главную">
+        <span class="brand__mark" aria-hidden="true">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round" stroke-linecap="round"><path d="M12 2.5l8 4.6v9.8l-8 4.6-8-4.6V7.1z"/><path d="M12 2.5v9.5l8 4.6M12 12l-8 4.6M12 12v9.5"/></svg>
+        </span>
+        <span class="brand__text">Поставки для клиник</span>
+      </a>
+    </div>
+  </header>
+
+  <main class="thanks">
+    <div class="container">
+      <div class="thanks__card reveal">
+        <span class="thanks__check" aria-hidden="true">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6L9 17l-5-5"/></svg>
+        </span>
+
+        <h1 class="thanks__title">Заявка получена</h1>
+        <p class="thanks__text">
+          Контакт приняли. Менеджер отправит наличие и условия поставки.
+        </p>
+        <p class="thanks__text thanks__text--muted">
+          Чтобы получить ответ быстрее, напишите нам в Telegram сейчас.
+        </p>
+
+        <!-- Ссылка формируется в script.js из переменной TELEGRAM_TARGET -->
+        <a id="telegram-btn" class="btn btn--primary btn--lg" data-telegram-link data-cta-location="main" href="#" target="_blank" rel="noopener">
+          <span class="btn__icon" aria-hidden="true">
+            <svg viewBox="0 0 24 24" fill="currentColor"><path d="M21.9 4.3 18.7 19.4c-.2 1-.9 1.3-1.8.8l-5-3.7-2.4 2.3c-.3.3-.5.5-1 .5l.4-5 9.2-8.3c.4-.4-.1-.6-.6-.2L6.3 13.4l-4.9-1.5c-1-.3-1-1 .2-1.5l19-7.3c.9-.3 1.6.2 1.3 1.2z"/></svg>
+          </span>
+          Написать в Telegram
+        </a>
+
+        <div class="message-box">
+          <div class="message-box__head">
+            <span class="message-box__label">Текст сообщения</span>
+            <button class="copy-btn" type="button" data-copy-target="#msg-text" aria-label="Скопировать текст сообщения">
+              <span class="copy-btn__icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V5a2 2 0 0 1 2-2h8"/></svg></span>
+              <span class="copy-btn__label">Копировать</span>
+            </button>
+          </div>
+          <p class="message-box__text" id="msg-text">
+            Здравствуйте. Уточняю наличие и условия поставки для клиники в Узбекистане.
+          </p>
+        </div>
+
+        <a class="back-link" href="index.html">← Вернуться на главную</a>
+      </div>
+    </div>
+  </main>
+
+  <!-- ===== Подвал / Дисклеймер ===== -->
+  <footer class="site-footer">
+    <div class="container site-footer__inner">
+      <span class="site-footer__mark" aria-hidden="true">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round" stroke-linecap="round"><path d="M12 2.5l8 4.6v9.8l-8 4.6-8-4.6V7.1z"/><path d="M12 2.5v9.5l8 4.6M12 12l-8 4.6M12 12v9.5"/></svg>
+      </span>
+      <p class="disclaimer">
+        Информация предназначена для B2B-аудитории. Не является медицинской рекомендацией,
+        инструкцией по применению или публичным предложением к продаже.
+      </p>
+    </div>
+  </footer>
+
+  <!-- ===== Плавающая иконка быстрой связи (Telegram) =====
+       На thank-you открывает Telegram напрямую (событие уже засчитано выше по воронке). -->
+  <div class="floating" aria-label="Быстрая связь">
+    <a class="floating__btn floating__btn--tg" data-telegram-link data-cta-location="floating" href="#" target="_blank" rel="noopener" aria-label="Написать в Telegram">
+      <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M21.9 4.3 18.7 19.4c-.2 1-.9 1.3-1.8.8l-5-3.7-2.4 2.3c-.3.3-.5.5-1 .5l.4-5 9.2-8.3c.4-.4-.1-.6-.6-.2L6.3 13.4l-4.9-1.5c-1-.3-1-1 .2-1.5l19-7.3c.9-.3 1.6.2 1.3 1.2z"/></svg>
+    </a>
+  </div>
+
+</body>
+</html>
