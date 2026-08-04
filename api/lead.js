@@ -1,18 +1,48 @@
 /* ============================================================
    Serverless-функция доставки лида в Telegram-группу.
    Платформа: Vercel (файл api/lead.js → маршрут POST /api/lead).
-   Node 18+ (глобальный fetch). Для Netlify/Cloudflare — см. LEAD-SETUP.md.
 
-   Переменные окружения (задаются в кабинете хостинга, НЕ в коде):
+   Переменные окружения (задаются в кабинете Vercel, НЕ в коде):
      TELEGRAM_BOT_TOKEN  — токен бота от @BotFather
-     TELEGRAM_CHAT_ID    — id вашей группы (обычно отрицательный, напр. -1001234567890)
+     TELEGRAM_CHAT_ID    — id группы (отрицательный, напр. -1001234567890)
 
-   ВАЖНО: токен живёт только здесь, на сервере. В client-side JS его быть не должно.
-   Контакт (Telegram/номер) уходит в ВАШУ группу — это ваш CRM, а не рекламный пиксель.
+   Формат сообщения:
+     🟦 Новый лид (B2B, Узбекистан)
+     Контакт: <телефон или @username>
+     Получен: 2026-08-04 14:24        ← время по Алматы (UTC+5)
+
+   + inline-кнопка «Написать в Telegram»:
+     @username → https://t.me/username
+     телефон   → https://t.me/+<цифры> (откроется, если номер есть в Telegram)
    ============================================================ */
 
+/* Время по Алматы. Основной путь — Intl с таймзоной; запасной — фикс. UTC+5
+   (Казахстан с 2024 года живёт на едином UTC+5 без перевода часов). */
+function almatyTime() {
+  try {
+    return new Intl.DateTimeFormat("sv-SE", {
+      timeZone: "Asia/Almaty",
+      year: "numeric", month: "2-digit", day: "2-digit",
+      hour: "2-digit", minute: "2-digit"
+    }).format(new Date());                       // "2026-08-04 14:24"
+  } catch (e) {
+    return new Date(Date.now() + 5 * 3600e3).toISOString().slice(0, 16).replace("T", " ");
+  }
+}
+
+/* Ссылка на чат с тем, кто оставил контакт. */
+function contactLink(contact) {
+  var v = String(contact || "").trim();
+  var phoneLike = /^[+\d][\d\s\-()]*$/.test(v);
+  if (phoneLike) {
+    var digits = v.replace(/\D/g, "");
+    return digits ? "https://t.me/+" + digits : null;
+  }
+  var handle = v.replace(/^@+/, "").replace(/[^A-Za-z0-9_]/g, "");
+  return handle ? "https://t.me/" + handle : null;
+}
+
 module.exports = async function handler(req, res) {
-  // CORS/preflight (обычно same-origin, но не мешает)
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type");
@@ -28,37 +58,34 @@ module.exports = async function handler(req, res) {
   if (typeof data === "string") { try { data = JSON.parse(data); } catch (e) { data = {}; } }
   data = data || {};
 
-  // Honeypot: если скрытое поле заполнено — это бот, тихо отвечаем ok.
+  // Honeypot: скрытое поле заполнено — бот, тихо отвечаем ok.
   if (data.website) return res.status(200).json({ ok: true, skipped: "honeypot" });
 
   const contact = String(data.contact || "").trim().slice(0, 120);
   if (!contact) return res.status(400).json({ ok: false, error: "no_contact" });
 
-  const a = data.attrib || {};
-  const row = (k, v) => (v ? `\n${k}: ${String(v).slice(0, 300)}` : "");
-
   const text =
     "🟦 Новый лид (B2B, Узбекистан)\n" +
-    "Контакт: " + contact +
-    row("Форма", data.form_location) +
-    row("utm_source", a.utm_source) +
-    row("utm_medium", a.utm_medium) +
-    row("utm_campaign", a.utm_campaign) +
-    row("utm_content", a.utm_content) +
-    row("utm_term", a.utm_term) +
-    row("fbclid", a.fbclid) +
-    row("gclid", a.gclid) +
-    row("yclid", a.yclid) +
-    row("Referrer", a.referrer) +
-    row("Landing", a.landing_page) +
-    row("Первый визит", a.first_visit_time) +
-    "\nПолучен: " + new Date().toISOString();
+    "Контакт: " + contact + "\n" +
+    "Получен: " + almatyTime();
+
+  const link = contactLink(contact);
+  const payload = {
+    chat_id: CHAT_ID,
+    text: text,
+    disable_web_page_preview: true
+  };
+  if (link) {
+    payload.reply_markup = {
+      inline_keyboard: [[{ text: "✍️ Написать в Telegram", url: link }]]
+    };
+  }
 
   try {
     const tg = await fetch(`https://api.telegram.org/bot${TOKEN}/sendMessage`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ chat_id: CHAT_ID, text: text, disable_web_page_preview: true })
+      body: JSON.stringify(payload)
     });
     const j = await tg.json();
     if (!j.ok) return res.status(502).json({ ok: false, error: "telegram_error", detail: j.description });
@@ -66,4 +93,4 @@ module.exports = async function handler(req, res) {
   } catch (e) {
     return res.status(502).json({ ok: false, error: "send_failed" });
   }
-}
+};
