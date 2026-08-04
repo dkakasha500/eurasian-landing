@@ -61,8 +61,11 @@ module.exports = async function handler(req, res) {
   // Honeypot: скрытое поле заполнено — бот, тихо отвечаем ok.
   if (data.website) return res.status(200).json({ ok: true, skipped: "honeypot" });
 
-  const contact = String(data.contact || "").trim().slice(0, 120);
+  let contact = String(data.contact || "").trim().slice(0, 120);
   if (!contact) return res.status(400).json({ ok: false, error: "no_contact" });
+
+  // Телефон без "+" в начале — добавляем "+" сами (единый вид: +996036730).
+  if (/^\d[\d\s\-()]*$/.test(contact)) contact = "+" + contact;
 
   const text =
     "🟦 Новый лид (B2B, Узбекистан)\n" +
