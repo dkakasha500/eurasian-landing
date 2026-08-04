@@ -33,10 +33,13 @@ const LEAD_ENDPOINT = "/api/lead";
    персональные/медицинские данные НИКОГДА не передаются.
 
    Карта событий:
-     Page:   view_landing, view_thank_you
-     Form:   form_start, form_error, lead_submit
+     Page:   view_landing (index), view_thank_you (thank-you)
+     Form:   form_start, form_error (index);
+             lead_submit — отправляется на THANK-YOU при загрузке
+             (форма на index ставит флаг в sessionStorage; так Lead
+             гарантированно доходит и не дублируется при обновлении)
      CTA:    click_primary_cta, click_secondary_cta,
-             click_floating_telegram_gate, click_telegram
+             click_floating_telegram_gate (index), click_telegram (thank-you)
      Scroll: scroll_25, scroll_50, scroll_75, scroll_90
      Time:   time_10s, time_30s, time_60s
 
@@ -167,7 +170,10 @@ function deliverLead(payload) {
   } catch (e) { console.warn("lead delivery error:", e); }
 }
 
-/* lead_submit — один раз на форму; контакт только локально + на ваш эндпоинт; редирект. */
+/* Успешная отправка: контакт локально + на ваш эндпоинт; редирект.
+   Событие lead_submit (Meta Lead) отправляется НЕ здесь, а на thank-you.html
+   при загрузке — так конверсия гарантированно успевает уйти (нет гонки с редиректом).
+   Здесь только ставим флаг для thank-you. */
 function submitLead(contact, loc) {
   saveLeadLocally(contact);
 
@@ -175,12 +181,8 @@ function submitLead(contact, loc) {
   try { attrib = JSON.parse(localStorage.getItem("b2b_attrib") || "{}"); } catch (e) {}
   deliverLead({ contact: contact, form_location: loc, page: "index", attrib: attrib, ts: new Date().toISOString() });
 
-  if (!firedOnce("lead_submit:" + loc)) {
-    trackEvent("lead_submit", Object.assign(
-      { page: "index", event_source: "web", form_location: loc, funnel_step: "lead_form" },
-      getUtmForPayload()
-    ));
-  }
+  try { sessionStorage.setItem("b2b_pending_lead", JSON.stringify({ form_location: loc, ts: Date.now() })); } catch (e) {}
+
   window.location.href = THANK_YOU_URL;
 }
 
@@ -425,5 +427,21 @@ document.addEventListener("DOMContentLoaded", function () {
     if (!firedOnce("view_thank_you")) {
       trackEvent("view_thank_you", { page: "thank_you", event_source: "web", funnel_step: "thank_you" });
     }
+
+    /* lead_submit (Meta Lead) — здесь, при попадании на страницу "Спасибо".
+       Флаг ставится формой на index и снимается сразу после отправки события,
+       поэтому обновление страницы или прямой заход НЕ создают повторный Lead. */
+    try {
+      var pendingRaw = sessionStorage.getItem("b2b_pending_lead");
+      if (pendingRaw) {
+        sessionStorage.removeItem("b2b_pending_lead");
+        var pending = {};
+        try { pending = JSON.parse(pendingRaw) || {}; } catch (e) {}
+        trackEvent("lead_submit", Object.assign(
+          { page: "thank_you", event_source: "web", form_location: pending.form_location || "form", funnel_step: "lead_form" },
+          getUtmForPayload()
+        ));
+      }
+    } catch (e) { console.warn("lead flag error:", e); }
   }
 });
