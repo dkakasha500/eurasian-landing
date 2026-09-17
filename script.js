@@ -186,9 +186,92 @@ function submitLead(contact, loc) {
   window.location.href = THANK_YOU_URL;
 }
 
+/* ============================================================
+   Слайдер-подтверждение отправки («проведите вправо»).
+   Защита от мусорных заявок: случайный тап или автоклик не
+   отправляет форму — после нажатия кнопки появляется ползунок,
+   и заявка уходит только после осознанного свайпа до конца.
+   ============================================================ */
+var SLIDE_LABEL = "Проведите вправо, чтобы отправить";
+function createSlideConfirm(form, submitBtn, onConfirm) {
+  var wrap = document.createElement("div");
+  wrap.className = "slide-confirm";
+  wrap.hidden = true;
+
+  var range = document.createElement("input");
+  range.type = "range";
+  range.className = "slide-confirm__range";
+  range.min = "0"; range.max = "100"; range.step = "1"; range.value = "0";
+  range.setAttribute("aria-label", "Проведите вправо, чтобы отправить заявку");
+
+  var label = document.createElement("span");
+  label.className = "slide-confirm__label";
+  label.textContent = SLIDE_LABEL;
+
+  wrap.appendChild(range);
+  wrap.appendChild(label);
+  form.appendChild(wrap);
+
+  var confirmed = false;
+  var lastV = 0; // последнее «честное» положение ползунка
+  function setFill(v) { wrap.style.setProperty("--p", v + "%"); }
+
+  function reset() {
+    confirmed = false;
+    range.disabled = false;
+    range.value = "0"; setFill(0); lastV = 0;
+    wrap.classList.remove("is-confirmed");
+    label.textContent = SLIDE_LABEL;
+    wrap.hidden = true;
+    if (submitBtn) submitBtn.hidden = false;
+  }
+
+  function show() {
+    if (confirmed) return;
+    range.value = "0"; setFill(0); lastV = 0;
+    wrap.hidden = false;
+    if (submitBtn) submitBtn.hidden = true;
+  }
+
+  function complete() {
+    if (confirmed) return;
+    confirmed = true;
+    range.value = "100"; setFill(100);
+    range.disabled = true;
+    wrap.classList.add("is-confirmed");
+    label.textContent = "Отправляем…";
+    onConfirm(reset);
+  }
+
+  range.addEventListener("input", function () {
+    if (confirmed) return;
+    var v = Number(range.value) || 0;
+    // Защита от «телепорта»: одиночный клик по дорожке (в т.ч. по правому
+    // краю) скачком меняет значение — это не свайп, откатываем. Настоящее
+    // ведение даёт плавную серию небольших приращений.
+    if (v - lastV > 45) { range.value = String(lastV); setFill(lastV); return; }
+    lastV = v;
+    setFill(v);
+    if (v >= 97) complete();
+  });
+  // Отпустили раньше конца — ползунок возвращается в начало.
+  ["change", "pointerup", "touchend", "mouseup"].forEach(function (evt) {
+    range.addEventListener(evt, function () {
+      if (!confirmed && Number(range.value) < 97) { range.value = "0"; setFill(0); lastV = 0; }
+    });
+  });
+
+  return {
+    show: show,
+    reset: reset,
+    isVisible: function () { return !wrap.hidden; }
+  };
+}
+
 /* Единый биндинг для всех форм (hero / bottom / popup):
-   form_start (1 раз), form_error (каждая неудача), lead_submit (успех),
-   click_primary_cta (клик по кнопке отправки). */
+   form_start (1 раз), form_error (каждая неудача),
+   click_primary_cta (клик по кнопке) → слайдер-подтверждение → отправка.
+   lead_submit (Meta Lead) уходит на thank-you. */
 function bindLeadForm(form) {
   var input = form.querySelector('input[name="contact"]');
   if (!input) return;
@@ -197,6 +280,27 @@ function bindLeadForm(form) {
   var submitBtn = form.querySelector('button[type="submit"]');
   var honeypot = form.querySelector('[name="website"]'); // антиспам-ловушка
 
+  function showError() {
+    input.classList.add("is-invalid");
+    input.setAttribute("aria-invalid", "true");
+    if (errorEl) errorEl.hidden = false;
+    trackEvent("form_error", { page: "index", form_location: loc, funnel_step: "lead_form" });
+  }
+
+  // Финальная отправка — только после свайпа. Контакт могли изменить,
+  // пока ползунок был на экране, поэтому проверяем ещё раз.
+  var slider = createSlideConfirm(form, submitBtn, function (resetSlider) {
+    if (honeypot && honeypot.value) { resetSlider(); return; }
+    if (!validateContact(input.value)) {
+      resetSlider();
+      showError();
+      input.focus();
+      return;
+    }
+    if (submitBtn) { submitBtn.disabled = true; submitBtn.setAttribute("aria-busy", "true"); }
+    submitLead(input.value.trim(), loc);
+  });
+
   input.addEventListener("input", function () {
     if (!firedOnce("form_start:" + loc)) {
       trackEvent("form_start", { page: "index", form_location: loc, funnel_step: "lead_form" });
@@ -204,6 +308,8 @@ function bindLeadForm(form) {
     input.classList.remove("is-invalid");
     input.setAttribute("aria-invalid", "false");
     if (errorEl) errorEl.hidden = true;
+    // Контакт изменили — прячем ползунок и возвращаем кнопку (нужна повторная проверка).
+    if (slider.isVisible()) slider.reset();
   });
 
   if (submitBtn) {
@@ -216,19 +322,15 @@ function bindLeadForm(form) {
     e.preventDefault();
     if (honeypot && honeypot.value) return; // honeypot заполнен — бот, тихо игнорируем
     if (!validateContact(input.value)) {
-      input.classList.add("is-invalid");
-      input.setAttribute("aria-invalid", "true");
-      if (errorEl) errorEl.hidden = false;
+      showError();
       input.focus();
-      trackEvent("form_error", { page: "index", form_location: loc, funnel_step: "lead_form" });
       return;
     }
     input.classList.remove("is-invalid");
     input.setAttribute("aria-invalid", "false");
     if (errorEl) errorEl.hidden = true;
-    // Блокируем кнопку после успеха — защита от двойной отправки (клик + Enter).
-    if (submitBtn) { submitBtn.disabled = true; submitBtn.setAttribute("aria-busy", "true"); }
-    submitLead(input.value.trim(), loc);
+    // Контакт валиден → показываем ползунок-подтверждение вместо мгновенной отправки.
+    slider.show();
   });
 }
 

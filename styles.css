@@ -718,3 +718,97 @@ body.modal-open { overflow: hidden; }
   .floating, .floating__btn { transition: none; }
   .modal__overlay, .modal__dialog { animation: none; }
 }
+
+/* ===================== Слайдер-подтверждение отправки =====================
+   Появляется на месте кнопки после нажатия «Отправить заявку».
+   Заявка уходит только после свайпа ползунка до конца — защита
+   от случайных нажатий и автокликов. */
+.slide-confirm {
+  position: relative;
+  margin-top: 10px;
+  --p: 0%;
+}
+.slide-confirm[hidden] { display: none; }
+
+.slide-confirm__range {
+  -webkit-appearance: none;
+  appearance: none;
+  display: block;
+  width: 100%;
+  height: 54px;
+  margin: 0;
+  border: 1px solid var(--line);
+  border-radius: 27px;
+  background: linear-gradient(to right, var(--accent-tint) 0 var(--p), #f0f4fa var(--p) 100%);
+  cursor: pointer;
+  touch-action: none; /* страница не скроллится, пока ведут ползунок */
+}
+.slide-confirm__range:focus-visible {
+  outline: 3px solid var(--ring);
+  outline-offset: 2px;
+}
+
+/* WebKit (Chrome / Safari) */
+.slide-confirm__range::-webkit-slider-runnable-track {
+  height: 52px;
+  background: transparent;
+  border-radius: 27px;
+}
+.slide-confirm__range::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 46px;
+  height: 46px;
+  margin-top: 3px;
+  border: none;
+  border-radius: 50%;
+  background: var(--primary)
+    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23ffffff' stroke-width='2.4' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M5 12h14M13 6l6 6-6 6'/%3E%3C/svg%3E")
+    center / 22px 22px no-repeat;
+  box-shadow: 0 2px 10px rgba(31, 71, 173, 0.35);
+  cursor: grab;
+}
+.slide-confirm__range:active::-webkit-slider-thumb { cursor: grabbing; }
+
+/* Firefox */
+.slide-confirm__range::-moz-range-track {
+  height: 52px;
+  background: transparent;
+  border-radius: 27px;
+}
+.slide-confirm__range::-moz-range-thumb {
+  width: 46px;
+  height: 46px;
+  border: none;
+  border-radius: 50%;
+  background: var(--primary)
+    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23ffffff' stroke-width='2.4' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M5 12h14M13 6l6 6-6 6'/%3E%3C/svg%3E")
+    center / 22px 22px no-repeat;
+  box-shadow: 0 2px 10px rgba(31, 71, 173, 0.35);
+  cursor: grab;
+}
+
+.slide-confirm__label {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0 16px 0 52px; /* текст правее «домашней» позиции ползунка */
+  font-size: 13.5px;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  color: var(--slate);
+  pointer-events: none;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.slide-confirm.is-confirmed .slide-confirm__range {
+  background: var(--primary);
+  border-color: var(--primary);
+}
+.slide-confirm.is-confirmed .slide-confirm__label {
+  color: #ffffff;
+  padding-left: 16px;
+}
