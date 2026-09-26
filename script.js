@@ -170,7 +170,28 @@ function deliverLead(payload) {
   } catch (e) { console.warn("lead delivery error:", e); }
 }
 
-/* Успешная отправка: контакт локально + на ваш эндпоинт; редирект.
+/* ============================================================
+   Анти-бот токен. Страница при загрузке получает у /api/lead
+   подписанный токен и отправляет его вместе с лидом. Сервер
+   принимает лид только с валидным токеном возрастом ≥ 2.5 с
+   (боты постят мгновенно) — прямые запросы на API без страницы
+   отклоняются. Для человека всё это незаметно.
+   ============================================================ */
+var LEAD_TOKEN = null;                   // { value, at }
+var LEAD_TOKEN_MIN_AGE_MS = 2500;        // = TOKEN_MIN_AGE_MS на сервере
+var LEAD_TOKEN_STALE_MS = 2.5 * 3600e3;  // старше — берём новый (сервер живёт 3 ч)
+var LEAD_TOKEN_REFRESH_MS = 40 * 60e3;   // фоновое обновление, пока страница открыта
+
+function fetchLeadToken() {
+  try {
+    return fetch(LEAD_ENDPOINT, { method: "GET", cache: "no-store", credentials: "same-origin" })
+      .then(function (r) { return r.json(); })
+      .then(function (j) { if (j && j.token) LEAD_TOKEN = { value: j.token, at: Date.now() }; })
+      .catch(function () {});
+  } catch (e) { return Promise.resolve(); }
+}
+
+/* Успешная отправка: контакт локально + на ваш эндпоинт (с токеном); редирект.
    Событие lead_submit (Meta Lead) отправляется НЕ здесь, а на thank-you.html
    при загрузке — так конверсия гарантированно успевает уйти (нет гонки с редиректом).
    Здесь только ставим флаг для thank-you. */
@@ -179,11 +200,27 @@ function submitLead(contact, loc) {
 
   var attrib = {};
   try { attrib = JSON.parse(localStorage.getItem("b2b_attrib") || "{}"); } catch (e) {}
-  deliverLead({ contact: contact, form_location: loc, page: "index", attrib: attrib, ts: new Date().toISOString() });
+  var payload = { contact: contact, form_location: loc, page: "index", attrib: attrib, ts: new Date().toISOString() };
 
-  try { sessionStorage.setItem("b2b_pending_lead", JSON.stringify({ form_location: loc, ts: Date.now() })); } catch (e) {}
+  function finish() {
+    payload.token = LEAD_TOKEN ? LEAD_TOKEN.value : "";
+    deliverLead(payload);
+    try { sessionStorage.setItem("b2b_pending_lead", JSON.stringify({ form_location: loc, ts: Date.now() })); } catch (e) {}
+    window.location.href = THANK_YOU_URL;
+  }
 
-  window.location.href = THANK_YOU_URL;
+  var age = LEAD_TOKEN ? Date.now() - LEAD_TOKEN.at : -1;
+  var stale = !LEAD_TOKEN || age > LEAD_TOKEN_STALE_MS;
+  if (!stale && age >= LEAD_TOKEN_MIN_AGE_MS) { finish(); return; }
+
+  // Редкий случай: токена нет / устарел / слишком свежий — добираем и выдерживаем
+  // минимальный возраст. Человека не держим дольше ~3 с (слайдер показывает «Отправляем…»).
+  var refetch = stale ? fetchLeadToken() : Promise.resolve();
+  var deadline = new Promise(function (r) { setTimeout(r, 3000); });
+  Promise.race([refetch, deadline]).then(function () {
+    var wait = LEAD_TOKEN ? Math.max(0, LEAD_TOKEN_MIN_AGE_MS - (Date.now() - LEAD_TOKEN.at)) : 0;
+    setTimeout(finish, Math.min(wait, 3000));
+  });
 }
 
 /* ============================================================
@@ -213,10 +250,37 @@ function createSlideConfirm(form, submitBtn, onConfirm) {
   form.appendChild(wrap);
 
   var confirmed = false;
-  var lastV = 0; // последнее «честное» положение ползунка
-  function setFill(v) { wrap.style.setProperty("--p", v + "%"); }
+  var lastV = 0;                    // последнее «честное» положение ползунка
+  var rafId = null, animating = false;
+  // --p — заливка дорожки (в %), --pn — то же число без единиц (для затухания подписи).
+  function setFill(v) { wrap.style.setProperty("--p", v + "%"); wrap.style.setProperty("--pn", String(v)); }
+
+  function stopAnim() {
+    if (rafId !== null && window.cancelAnimationFrame) cancelAnimationFrame(rafId);
+    rafId = null; animating = false;
+  }
+
+  // Плавный откат в начало (value у range через CSS не анимируется — ведём вручную).
+  function animateBack() {
+    stopAnim();
+    var from = Number(range.value) || 0;
+    if (!from || !window.requestAnimationFrame) { range.value = "0"; setFill(0); lastV = 0; return; }
+    var dur = 240, start = null;
+    animating = true;
+    function step(t) {
+      if (start === null) start = t;
+      var k = Math.min(1, (t - start) / dur);
+      var e = 1 - Math.pow(1 - k, 3); // ease-out
+      var v = Math.round(from * (1 - e));
+      range.value = String(v); setFill(v); lastV = v;
+      if (k < 1) { rafId = requestAnimationFrame(step); }
+      else { rafId = null; animating = false; lastV = 0; }
+    }
+    rafId = requestAnimationFrame(step);
+  }
 
   function reset() {
+    stopAnim();
     confirmed = false;
     range.disabled = false;
     range.value = "0"; setFill(0); lastV = 0;
@@ -228,6 +292,7 @@ function createSlideConfirm(form, submitBtn, onConfirm) {
 
   function show() {
     if (confirmed) return;
+    stopAnim();
     range.value = "0"; setFill(0); lastV = 0;
     wrap.hidden = false;
     if (submitBtn) submitBtn.hidden = true;
@@ -235,13 +300,22 @@ function createSlideConfirm(form, submitBtn, onConfirm) {
 
   function complete() {
     if (confirmed) return;
+    stopAnim();
     confirmed = true;
     range.value = "100"; setFill(100);
     range.disabled = true;
     wrap.classList.add("is-confirmed");
     label.textContent = "Отправляем…";
+    try { if (navigator.vibrate) navigator.vibrate(12); } catch (e) {} // лёгкий отклик (Android)
     onConfirm(reset);
   }
+
+  // Взялись за ползунок во время отката — откат прерывается, точка отсчёта = текущее положение.
+  ["pointerdown", "touchstart", "mousedown", "keydown"].forEach(function (evt) {
+    range.addEventListener(evt, function () {
+      if (animating) { stopAnim(); lastV = Number(range.value) || 0; }
+    }, { passive: true });
+  });
 
   range.addEventListener("input", function () {
     if (confirmed) return;
@@ -254,10 +328,10 @@ function createSlideConfirm(form, submitBtn, onConfirm) {
     setFill(v);
     if (v >= 97) complete();
   });
-  // Отпустили раньше конца — ползунок возвращается в начало.
+  // Отпустили раньше конца — ползунок плавно возвращается в начало.
   ["change", "pointerup", "touchend", "mouseup"].forEach(function (evt) {
     range.addEventListener(evt, function () {
-      if (!confirmed && Number(range.value) < 97) { range.value = "0"; setFill(0); lastV = 0; }
+      if (!confirmed && Number(range.value) < 97) animateBack();
     });
   });
 
@@ -523,6 +597,9 @@ document.addEventListener("DOMContentLoaded", function () {
       trackEvent("view_landing", { page: "index", event_source: "web", funnel_step: "landing" });
     }
     document.querySelectorAll("form.lead-form").forEach(bindLeadForm);
+    // Анти-бот токен: берём при загрузке (заодно «прогревает» функцию) и обновляем фоном.
+    fetchLeadToken();
+    setInterval(fetchLeadToken, LEAD_TOKEN_REFRESH_MS);
   }
 
   if (page === "thank-you") {
