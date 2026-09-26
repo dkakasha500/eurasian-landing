@@ -119,7 +119,7 @@ Environment Variables — в настройках Pages.
 
 ## Анти-бот защита (без капчи)
 
-Слой 1 — **на странице**: заявка уходит только после свайпа ползунка «Проведите вправо» (случайные тапы, автоклики и программная отправка формы не проходят); скрытое honeypot-поле `website`.
+Слой 1 — **на странице**: заявка уходит только после свайпа бегунка «Проведите вправо» до конца. Вести можно **только сам бегунок** — клик по дорожке ничего не переключает (бегунок лишь коротко «подёргивается» как подсказка); тап, рывок короче 100 мс и программная отправка формы не проходят. Доступность: стрелки/Enter на бегунке, для экранных читалок — скрытая кнопка «Подтвердить отправку». Плюс скрытое honeypot-поле `website`.
 
 Слой 2 — **на сервере** (`api/lead.js`), закрывает прямые запросы к API минуя сайт:
 - при загрузке страница получает `GET /api/lead` → подписанный токен `<время>.<HMAC>`; ключ подписи выводится из `TELEGRAM_BOT_TOKEN` (или из отдельной переменной `LEAD_TOKEN_SECRET`, если задать);
@@ -144,7 +144,7 @@ Environment Variables — в настройках Pages.
 
 1. **Разметка формы.** Каждая форма должна иметь: `<form class="lead-form" data-form-location="…">`, поле `<input name="contact">`, кнопку `<button type="submit">`, скрытое honeypot-поле `<input class="hp-field" name="website" tabindex="-1" autocomplete="off" aria-hidden="true">`, необязательный блок ошибки `.field-error`. На `<body>` — `data-page="index"` (страница с формами) / `data-page="thank-you"`.
 2. **JS.** Из `script.js` перенести блоки: CONFIG (`THANK_YOU_URL`, `LEAD_ENDPOINT`), `validateContact`/`saveLeadLocally`, весь блок «Доставка лида + анти-бот токен» (`fetchLeadToken`, `ensureAgedToken`, `sendLead`, `submitLead`), блок «Слайдер-подтверждение» (`SLIDE_TEXT`, `SWIPE_*`, `createSlideConfirm`, `bindLeadForm`) и в инициализации: `document.querySelectorAll("form.lead-form").forEach(bindLeadForm); fetchLeadToken(); setInterval(fetchLeadToken, LEAD_TOKEN_REFRESH_MS);` + обработчик `pageshow`. Тексты слайдера — в `SLIDE_TEXT` (одно место). Если на новом сайте нет `trackEvent`, оставьте заглушку `function trackEvent(){}`.
-3. **CSS.** Скопировать блок «Слайдер-подтверждение отправки» из конца `styles.css` целиком. Он самодостаточен: у всех переменных есть fallback-значения (`var(--primary, #2f63e6)` и т. д.) — при желании подставьте цвета нового сайта. Цвет галочки в бегунке зашит в SVG (`%232f63e6`) — замените на свой primary. Правило `.lead-form button[type="submit"][hidden] { display:none }` обязательно: без него кнопка не скроется, если у неё задан свой `display`.
+3. **CSS.** Скопировать блок «Слайдер-подтверждение отправки» из конца `styles.css` целиком (включая `.sr-only`). Он самодостаточен: у всех переменных есть fallback-значения (`var(--primary, #2f63e6)` и т. д.) — при желании подставьте цвета нового сайта; иконки — inline-SVG с `currentColor`, перекрашиваются сами. Разметку слайдера JS создаёт сам — в HTML ничего добавлять не нужно. Правило `.lead-form button[type="submit"][hidden] { display:none }` обязательно: без него кнопка не скроется, если у неё задан свой `display`.
 4. **Сервер.** Скопировать `api/lead.js`; поменять текст сообщения, таймзону в `almatyTime()` и `DEFAULT_COUNTRY_CODE`/`LOCAL_PHONE_DIGITS` под страну; в Vercel задать `TELEGRAM_BOT_TOKEN` и `TELEGRAM_CHAT_ID` (отдельный секрет для токена не нужен). Клиент и сервер согласованы через `minAge` в ответе `GET /api/lead` — константу менять только на сервере.
 5. **Проверка** — шаг 5 выше. Если сайт не на Vercel — см. варианты Netlify/Cloudflare.
 

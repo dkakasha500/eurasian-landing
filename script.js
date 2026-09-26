@@ -269,39 +269,51 @@ function submitLead(contact, loc) {
    отправляет форму — после нажатия кнопки появляется ползунок,
    и заявка уходит только после осознанного свайпа до конца.
 
-   Что считается свайпом: ползунок доведён до ≥97 % за ≥3 отсчёта
-   движения и ≥100 мс с момента захвата. Одиночный тап по краю
-   дорожки — 1 отсчёт за 0 мс — не проходит: бегунок доезжает и
-   плавно откатывается (человек видит, что нужно именно провести).
-   Клавиатура (доступность): стрелки ведут ползунок, Enter/Space
-   на нём — подтверждение; откат для клавиатурных шагов не делаем.
+   Реализация своя (не <input type=range>): вести можно ТОЛЬКО сам
+   бегунок — клик по дорожке ничего не переключает, лишь коротко
+   «подёргивает» бегунок как подсказку. Свайп засчитывается, когда
+   бегунок доведён до ≥97 % за ≥3 движения и ≥100 мс с захвата.
+   Отпустили раньше — плавный откат. Клавиатура: стрелки ведут,
+   Enter/Space на бегунке — подтверждение. Экранные читалки: скрытая
+   визуально кнопка «Подтвердить отправку».
    ============================================================ */
 var SLIDE_TEXT = {
   hint:    "Проведите вправо, чтобы отправить",
-  aria:    "Проведите вправо, чтобы отправить заявку",
+  aria:    "Ползунок подтверждения: проведите вправо до конца, чтобы отправить заявку",
+  confirm: "Подтвердить отправку заявки",
   sending: "Отправляем…"
 };
-var SWIPE_MIN_SAMPLES = 3;   // минимум отсчётов движения
+var SWIPE_MIN_SAMPLES = 3;   // минимум движений бегунка
 var SWIPE_MIN_MS = 100;      // минимум длительности жеста
 var SWIPE_DONE_AT = 97;      // порог «доведён до конца», %
+var SLIDE_ICON_ARROW = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12h14M13 6l6 6-6 6"/></svg>';
+var SLIDE_ICON_CHECK = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 6L9 17l-5-5"/></svg>';
 
 function createSlideConfirm(form, submitBtn, onConfirm) {
   var wrap = document.createElement("div");
   wrap.className = "slide-confirm";
   wrap.hidden = true;
-
-  var range = document.createElement("input");
-  range.type = "range";
-  range.className = "slide-confirm__range";
-  range.min = "0"; range.max = "100"; range.step = "1"; range.value = "0";
-  range.setAttribute("aria-label", SLIDE_TEXT.aria);
-
-  var label = document.createElement("span");
-  label.className = "slide-confirm__label";
+  wrap.innerHTML =
+    '<div class="slide-confirm__track">' +
+      '<span class="slide-confirm__fill" aria-hidden="true"></span>' +
+      '<span class="slide-confirm__label" aria-hidden="true"></span>' +
+      '<div class="slide-confirm__knob" role="slider" tabindex="0" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">' +
+        '<span class="slide-confirm__knob-inner">' +
+          '<span class="slide-confirm__icon slide-confirm__icon--arrow">' + SLIDE_ICON_ARROW + '</span>' +
+          '<span class="slide-confirm__icon slide-confirm__icon--check">' + SLIDE_ICON_CHECK + '</span>' +
+        '</span>' +
+      '</div>' +
+    '</div>' +
+    '<button type="button" class="slide-confirm__sr-confirm sr-only"></button>';
+  var track = wrap.querySelector(".slide-confirm__track");
+  var fill  = wrap.querySelector(".slide-confirm__fill");
+  var label = wrap.querySelector(".slide-confirm__label");
+  var knob  = wrap.querySelector(".slide-confirm__knob");
+  var srBtn = wrap.querySelector(".slide-confirm__sr-confirm");
   label.textContent = SLIDE_TEXT.hint;
+  knob.setAttribute("aria-label", SLIDE_TEXT.aria);
+  srBtn.textContent = SLIDE_TEXT.confirm;
 
-  wrap.appendChild(range);
-  wrap.appendChild(label);
   // Ставим сразу под кнопкой (в hero кнопка внутри .field-row — тогда под всей строкой),
   // чтобы слайдер появлялся ровно там, куда смотрит человек, а не в конце формы.
   var anchor = submitBtn ? (submitBtn.closest(".field-row") || submitBtn) : null;
@@ -309,119 +321,182 @@ function createSlideConfirm(form, submitBtn, onConfirm) {
   else form.appendChild(wrap);
 
   var confirmed = false;
+  var value = 0;                // 0..100
   var rafId = null;
-  var gesture = { start: 0, samples: 0, viaKey: false };
+  var drag = null;              // { startX, startV, start, samples, pointerId }
+  var viaKey = false;
   var now = function () { return (window.performance && performance.now) ? performance.now() : Date.now(); };
-  // Экранные читалки (VoiceOver/TalkBack) двигают ползунок без pointer/keyboard-событий:
-  // приходят только input/change. Такое ведение считаем осознанным и не откатываем.
-  var isAssistive = function () { return !gesture.start && !gesture.viaKey; };
-  var swipeDone = function () {
-    return (Number(range.value) || 0) >= SWIPE_DONE_AT &&
-      (gesture.viaKey || isAssistive() ||
-       (gesture.samples >= SWIPE_MIN_SAMPLES && (now() - gesture.start) >= SWIPE_MIN_MS));
-  };
 
-  // --p — заливка дорожки (в %), --pn — то же число без единиц (для затухания подписи).
-  function setFill(v) { wrap.style.setProperty("--p", v + "%"); wrap.style.setProperty("--pn", String(v)); }
-
+  /* Ход бегунка в пикселях (ширина дорожки минус бегунок и отступы). В тестовой среде без
+     раскладки берём условные 240px, чтобы математика оставалась осмысленной. */
+  function travel() {
+    var w = track.clientWidth;
+    if (!w) return 240;
+    return Math.max(1, w - knob.offsetWidth - 8);
+  }
+  function setValue(v) {
+    value = Math.max(0, Math.min(100, v));
+    var px = value / 100 * travel();
+    knob.style.transform = "translateX(" + px + "px)";
+    fill.style.width = "calc(" + px + "px + " + (knob.offsetWidth || 46) + "px + 4px)";
+    wrap.style.setProperty("--p", value + "%");
+    wrap.style.setProperty("--pn", String(Math.round(value)));
+    knob.setAttribute("aria-valuenow", String(Math.round(value)));
+  }
   function stopAnim() {
     if (rafId !== null && window.cancelAnimationFrame) cancelAnimationFrame(rafId);
     rafId = null;
   }
-
-  // Плавный откат в начало (value у range через CSS не анимируется — ведём вручную).
+  // Плавный откат в начало.
   function animateBack() {
     stopAnim();
-    var from = Number(range.value) || 0;
-    if (!from || !window.requestAnimationFrame) { range.value = "0"; setFill(0); return; }
+    var from = value;
+    if (!from || !window.requestAnimationFrame) { setValue(0); return; }
     var dur = 240, start = null;
     function step(t) {
       if (start === null) start = t;
       var k = Math.min(1, (t - start) / dur);
       var e = 1 - Math.pow(1 - k, 3); // ease-out
-      var v = Math.round(from * (1 - e));
-      range.value = String(v); setFill(v);
-      if (k < 1) { rafId = requestAnimationFrame(step); }
-      else { rafId = null; }
+      setValue(from * (1 - e));
+      if (k < 1) { rafId = requestAnimationFrame(step); } else { rafId = null; }
     }
     rafId = requestAnimationFrame(step);
+  }
+  function swipeDone() {
+    if (value < SWIPE_DONE_AT) return false;
+    if (viaKey) return true;
+    return !!drag && drag.samples >= SWIPE_MIN_SAMPLES && (now() - drag.start) >= SWIPE_MIN_MS;
   }
 
   function reset() {
     stopAnim();
-    confirmed = false;
-    gesture = { start: 0, samples: 0, viaKey: false };
-    range.disabled = false;
-    range.value = "0"; setFill(0);
+    confirmed = false; drag = null; viaKey = false;
+    setValue(0);
     wrap.classList.remove("is-confirmed");
     label.textContent = SLIDE_TEXT.hint;
+    knob.removeAttribute("aria-disabled");
+    srBtn.disabled = false;
     wrap.hidden = true;
     if (submitBtn) { submitBtn.hidden = false; submitBtn.disabled = false; submitBtn.removeAttribute("aria-busy"); }
   }
-
   function show() {
     if (confirmed) return;
     stopAnim();
-    gesture = { start: 0, samples: 0, viaKey: false };
-    range.value = "0"; setFill(0);
+    drag = null; viaKey = false;
+    setValue(0);
     wrap.hidden = false;
     if (submitBtn) submitBtn.hidden = true;
-    // Фокус — на ползунок: на телефоне это закрывает клавиатуру (иначе она перекрывает слайдер),
+    // Фокус — на бегунок: на телефоне это закрывает клавиатуру (иначе она перекрывает слайдер),
     // с клавиатуры можно сразу вести стрелками / подтвердить Enter.
-    try { range.focus({ preventScroll: true }); } catch (e) { try { range.focus(); } catch (e2) {} }
+    try { knob.focus({ preventScroll: true }); } catch (e) { try { knob.focus(); } catch (e2) {} }
     // Показываем целиком (в модалке не скроллим — она фиксирована и сама помещается на экран).
     try { if (!wrap.closest(".modal") && wrap.scrollIntoView) wrap.scrollIntoView({ block: "nearest", behavior: "smooth" }); } catch (e) {}
   }
-
   function complete() {
     if (confirmed) return;
     stopAnim();
-    confirmed = true;
-    range.value = "100"; setFill(100);
-    range.disabled = true;
+    confirmed = true; drag = null;
+    setValue(100);
     wrap.classList.add("is-confirmed");
     label.textContent = SLIDE_TEXT.sending;
+    knob.setAttribute("aria-disabled", "true");
+    srBtn.disabled = true;
     try { if (navigator.vibrate) navigator.vibrate(12); } catch (e) {} // лёгкий отклик (Android)
     onConfirm(reset);
   }
 
-  // Начало жеста: точка отсчёта времени и счётчик движений; откат прерывается.
-  // pointerdown — основной; touchstart/mousedown — запасные для старых браузеров
-  // (если pointerdown уже был < 50 мс назад, повторно жест не сбрасываем).
-  ["pointerdown", "touchstart", "mousedown"].forEach(function (evt) {
-    range.addEventListener(evt, function () {
-      if (confirmed) return;
-      stopAnim();
-      if (gesture.start && now() - gesture.start < 50) return;
-      gesture = { start: now(), samples: 0, viaKey: false };
-    }, { passive: true });
-  });
-
-  // Клавиатура: шаги стрелками не откатываем; Enter / Space — подтверждение.
-  range.addEventListener("keydown", function (e) {
+  /* ---- Ведение бегунка (pointer events; для старых браузеров — mouse/touch) ---- */
+  var hasPointer = typeof window.PointerEvent !== "undefined";
+  function pointX(e) {
+    if (e.touches && e.touches[0]) return e.touches[0].clientX;
+    if (e.changedTouches && e.changedTouches[0]) return e.changedTouches[0].clientX;
+    return e.clientX || 0;
+  }
+  function onDown(e) {
     if (confirmed) return;
+    if (e.button !== undefined && e.button !== 0 && e.type !== "touchstart") return; // только основная кнопка
+    if (e.cancelable) e.preventDefault();  // не выделять текст / не скроллить страницу
     stopAnim();
-    gesture.viaKey = true;
-    if (e.key === "Enter" || e.key === " " || e.key === "Spacebar") { e.preventDefault(); complete(); }
-  });
-
-  range.addEventListener("input", function () {
+    viaKey = false;
+    drag = { startX: pointX(e), startV: value, start: now(), samples: 0, pointerId: e.pointerId };
+    try { if (hasPointer && knob.setPointerCapture && e.pointerId !== undefined) knob.setPointerCapture(e.pointerId); } catch (err) {}
+    wrap.classList.add("is-dragging");
+    bindMove();
+  }
+  function onMove(e) {
+    if (!drag || confirmed) return;
+    if (e.cancelable) e.preventDefault();
+    var dx = pointX(e) - drag.startX;
+    drag.samples += 1;
+    setValue(drag.startV + dx / travel() * 100);
+    if (swipeDone()) { finishDrag(); complete(); }
+  }
+  function onUp() {
+    if (!drag) return;
+    var done = swipeDone(); // быстрый флик до упора: проверяем при отпускании
+    finishDrag();
     if (confirmed) return;
-    gesture.samples += 1;
-    setFill(Number(range.value) || 0);
+    if (done) complete(); else animateBack();
+  }
+  function finishDrag() {
+    wrap.classList.remove("is-dragging");
+    unbindMove();
+    if (drag && hasPointer && knob.releasePointerCapture && drag.pointerId !== undefined) {
+      try { knob.releasePointerCapture(drag.pointerId); } catch (err) {}
+    }
+    drag = null;
+  }
+  var moveEvents = hasPointer ? ["pointermove"] : ["mousemove", "touchmove"];
+  var upEvents   = hasPointer ? ["pointerup", "pointercancel"] : ["mouseup", "touchend", "touchcancel"];
+  function bindMove() {
+    moveEvents.forEach(function (t) { window.addEventListener(t, onMove, { passive: false }); });
+    upEvents.forEach(function (t) { window.addEventListener(t, onUp); });
+  }
+  function unbindMove() {
+    moveEvents.forEach(function (t) { window.removeEventListener(t, onMove); });
+    upEvents.forEach(function (t) { window.removeEventListener(t, onUp); });
+  }
+  (hasPointer ? ["pointerdown"] : ["mousedown", "touchstart"]).forEach(function (t) {
+    knob.addEventListener(t, onDown, { passive: false });
+  });
+  // Потеря захвата (системный жест, смена вкладки) — считаем отпусканием.
+  if (hasPointer) knob.addEventListener("lostpointercapture", function () { if (drag) onUp(); });
+
+  // Клик/тап по дорожке (мимо бегунка) НИЧЕГО не переключает — только подсказка «возьми меня».
+  track.addEventListener(hasPointer ? "pointerdown" : "mousedown", function (e) {
+    if (confirmed || e.target === knob || knob.contains(e.target)) return;
+    if (e.cancelable) e.preventDefault();
+    var inner = knob.firstElementChild;
+    if (!inner) return;
+    inner.classList.remove("is-hint");
+    void inner.offsetWidth; // перезапуск анимации
+    inner.classList.add("is-hint");
+    setTimeout(function () { inner.classList.remove("is-hint"); }, 500);
+  }, { passive: false });
+
+  /* ---- Клавиатура на бегунке ---- */
+  knob.addEventListener("keydown", function (e) {
+    if (confirmed) return;
+    var step = 10, v = null;
+    switch (e.key) {
+      case "ArrowRight": case "ArrowUp":   v = value + step; break;
+      case "ArrowLeft":  case "ArrowDown": v = value - step; break;
+      case "PageUp":   v = value + 25; break;
+      case "PageDown": v = value - 25; break;
+      case "Home": v = 0; break;
+      case "End":  v = 100; break;
+      case "Enter": case " ": case "Spacebar":
+        e.preventDefault(); viaKey = true; complete(); return;
+      default: return;
+    }
+    e.preventDefault();
+    stopAnim(); viaKey = true;
+    setValue(v);
     if (swipeDone()) complete();
-    // иначе — тап/телепорт или ещё слишком рано: решим при отпускании
   });
 
-  // Отпустили. Быстрый флик до упора (значение «залипло» на 100, новых input нет) —
-  // проверяем ещё раз здесь; иначе плавно возвращаем в начало.
-  ["change", "pointerup", "pointercancel", "lostpointercapture", "touchend", "touchcancel", "mouseup"].forEach(function (evt) {
-    range.addEventListener(evt, function () {
-      if (confirmed || gesture.viaKey || isAssistive()) return;
-      if (swipeDone()) { complete(); return; }
-      animateBack();
-    });
-  });
+  /* ---- Экранные читалки: явная кнопка подтверждения (визуально скрыта) ---- */
+  srBtn.addEventListener("click", function () { if (!confirmed) { viaKey = true; complete(); } });
 
   return {
     show: show,
