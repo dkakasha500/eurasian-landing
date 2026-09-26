@@ -158,37 +158,72 @@ function saveLeadLocally(contact) {
   console.log("Заявка (сохранено локально, в пиксель НЕ отправляется):", contact);
 }
 
-/* Доставка лида менеджеру: контакт уходит на ВАШ эндпоинт (→ Telegram-группа),
-   а НЕ в рекламные пиксели. Запрос переживает редирект (sendBeacon / keepalive). */
-function deliverLead(payload) {
-  try {
-    var body = JSON.stringify(payload);
-    if (navigator.sendBeacon && navigator.sendBeacon(LEAD_ENDPOINT, new Blob([body], { type: "application/json" }))) return;
-    fetch(LEAD_ENDPOINT, {
-      method: "POST", headers: { "Content-Type": "application/json" }, body: body, keepalive: true
-    }).catch(function () {});
-  } catch (e) { console.warn("lead delivery error:", e); }
-}
-
 /* ============================================================
-   Анти-бот токен. Страница при загрузке получает у /api/lead
-   подписанный токен и отправляет его вместе с лидом. Сервер
-   принимает лид только с валидным токеном возрастом ≥ 2.5 с
-   (боты постят мгновенно) — прямые запросы на API без страницы
-   отклоняются. Для человека всё это незаметно.
+   Доставка лида менеджеру + анти-бот токен.
+   Контакт уходит на ВАШ эндпоинт (→ Telegram-группа), а НЕ в пиксели.
+
+   Токен: страница при загрузке получает у /api/lead подписанный
+   токен; сервер принимает лид только с валидным токеном возрастом
+   ≥ minAge (боты постят мгновенно). Прямые запросы к API без
+   страницы отклоняются. Для человека всё незаметно.
+
+   Надёжность: отправка ждёт ответ сервера (до 4 с); если сервер
+   не принял токен — берём новый и повторяем один раз. Что бы ни
+   случилось с сетью, человек уходит на thank-you не позже чем
+   через LEAD_HARD_DEADLINE_MS.
    ============================================================ */
-var LEAD_TOKEN = null;                   // { value, at }
-var LEAD_TOKEN_MIN_AGE_MS = 2500;        // = TOKEN_MIN_AGE_MS на сервере
-var LEAD_TOKEN_STALE_MS = 2.5 * 3600e3;  // старше — берём новый (сервер живёт 3 ч)
-var LEAD_TOKEN_REFRESH_MS = 40 * 60e3;   // фоновое обновление, пока страница открыта
+var LEAD_TOKEN = null;                    // { value, at, minAge }
+var LEAD_TOKEN_DEFAULT_MIN_AGE = 2500;    // если сервер не прислал minAge
+var LEAD_TOKEN_STALE_MS = 2.5 * 3600e3;   // старше — берём новый (сервер живёт 3 ч)
+var LEAD_TOKEN_REFRESH_MS = 40 * 60e3;    // фоновое обновление, пока страница открыта
+var LEAD_SEND_TIMEOUT_MS = 4000;          // ждём ответ сервера не дольше
+var LEAD_HARD_DEADLINE_MS = 9000;         // абсолютный предел ожидания перед редиректом
 
 function fetchLeadToken() {
   try {
     return fetch(LEAD_ENDPOINT, { method: "GET", cache: "no-store", credentials: "same-origin" })
       .then(function (r) { return r.json(); })
-      .then(function (j) { if (j && j.token) LEAD_TOKEN = { value: j.token, at: Date.now() }; })
+      .then(function (j) {
+        if (j && j.token) LEAD_TOKEN = { value: j.token, at: Date.now(), minAge: Number(j.minAge) || LEAD_TOKEN_DEFAULT_MIN_AGE };
+      })
       .catch(function () {});
   } catch (e) { return Promise.resolve(); }
+}
+
+/* Возвращает Promise<string|null>: токен, «выдержанный» до минимального возраста.
+   Токен фиксируется в момент вызова — фоновое обновление его не подменит. */
+function ensureAgedToken(budgetMs) {
+  var budget = typeof budgetMs === "number" ? Math.max(0, budgetMs) : 6000;
+  var t = LEAD_TOKEN;
+  var stale = !t || (Date.now() - t.at) > LEAD_TOKEN_STALE_MS;
+  var get = stale
+    ? Promise.race([fetchLeadToken(), new Promise(function (r) { setTimeout(r, Math.min(3000, budget)); })]).then(function () { return LEAD_TOKEN; })
+    : Promise.resolve(t);
+  var started = Date.now();
+  return get.then(function (tok) {
+    if (!tok) return null;
+    var wait = Math.max(0, tok.minAge - (Date.now() - tok.at));
+    var left = Math.max(0, budget - (Date.now() - started));
+    return new Promise(function (r) { setTimeout(function () { r(tok.value); }, Math.min(wait, left)); });
+  });
+}
+
+/* POST лида с ожиданием ответа. keepalive — запрос доживёт, даже если страница уйдёт.
+   Резолвится всегда: { ok, error }. */
+function sendLead(payload) {
+  return new Promise(function (resolve) {
+    var settled = false;
+    var done = function (r) { if (!settled) { settled = true; resolve(r); } };
+    var timer = setTimeout(function () { done({ ok: false, error: "timeout" }); }, LEAD_SEND_TIMEOUT_MS);
+    try {
+      fetch(LEAD_ENDPOINT, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload), keepalive: true, credentials: "same-origin"
+      }).then(function (r) { return r.json().catch(function () { return { ok: r.ok }; }); })
+        .then(function (j) { clearTimeout(timer); done({ ok: !!(j && j.ok), error: (j && j.error) || (j && j.ok ? "" : "http") }); })
+        .catch(function () { clearTimeout(timer); done({ ok: false, error: "network" }); });
+    } catch (e) { clearTimeout(timer); done({ ok: false, error: "network" }); }
+  });
 }
 
 /* Успешная отправка: контакт локально + на ваш эндпоинт (с токеном); редирект.
@@ -202,25 +237,30 @@ function submitLead(contact, loc) {
   try { attrib = JSON.parse(localStorage.getItem("b2b_attrib") || "{}"); } catch (e) {}
   var payload = { contact: contact, form_location: loc, page: "index", attrib: attrib, ts: new Date().toISOString() };
 
-  function finish() {
-    payload.token = LEAD_TOKEN ? LEAD_TOKEN.value : "";
-    deliverLead(payload);
+  var gone = false;
+  function go() {
+    if (gone) return; gone = true;
     try { sessionStorage.setItem("b2b_pending_lead", JSON.stringify({ form_location: loc, ts: Date.now() })); } catch (e) {}
     window.location.href = THANK_YOU_URL;
   }
+  var startedAt = Date.now();
+  var hardDeadline = setTimeout(go, LEAD_HARD_DEADLINE_MS);
+  var left = function () { return LEAD_HARD_DEADLINE_MS - (Date.now() - startedAt); };
 
-  var age = LEAD_TOKEN ? Date.now() - LEAD_TOKEN.at : -1;
-  var stale = !LEAD_TOKEN || age > LEAD_TOKEN_STALE_MS;
-  if (!stale && age >= LEAD_TOKEN_MIN_AGE_MS) { finish(); return; }
-
-  // Редкий случай: токена нет / устарел / слишком свежий — добираем и выдерживаем
-  // минимальный возраст. Человека не держим дольше ~3 с (слайдер показывает «Отправляем…»).
-  var refetch = stale ? fetchLeadToken() : Promise.resolve();
-  var deadline = new Promise(function (r) { setTimeout(r, 3000); });
-  Promise.race([refetch, deadline]).then(function () {
-    var wait = LEAD_TOKEN ? Math.max(0, LEAD_TOKEN_MIN_AGE_MS - (Date.now() - LEAD_TOKEN.at)) : 0;
-    setTimeout(finish, Math.min(wait, 3000));
-  });
+  ensureAgedToken(left() - LEAD_SEND_TIMEOUT_MS)
+    .then(function (token) { payload.token = token || ""; return sendLead(payload); })
+    .then(function (r) {
+      if (r.ok || !/^token_/.test(r.error || "")) return r;
+      // Сервер не принял токен (истёк / не был получен) — новый токен, выдержка, один повтор
+      // в пределах оставшегося бюджета времени.
+      LEAD_TOKEN = null;
+      return ensureAgedToken(left() - 1500).then(function (token) { payload.token = token || ""; return sendLead(payload); });
+    })
+    .then(function (r) {
+      if (!r.ok) console.warn("lead not accepted by server:", r.error);
+      clearTimeout(hardDeadline); go();
+    })
+    .catch(function () { clearTimeout(hardDeadline); go(); });
 }
 
 /* ============================================================
@@ -228,8 +268,23 @@ function submitLead(contact, loc) {
    Защита от мусорных заявок: случайный тап или автоклик не
    отправляет форму — после нажатия кнопки появляется ползунок,
    и заявка уходит только после осознанного свайпа до конца.
+
+   Что считается свайпом: ползунок доведён до ≥97 % за ≥3 отсчёта
+   движения и ≥100 мс с момента захвата. Одиночный тап по краю
+   дорожки — 1 отсчёт за 0 мс — не проходит: бегунок доезжает и
+   плавно откатывается (человек видит, что нужно именно провести).
+   Клавиатура (доступность): стрелки ведут ползунок, Enter/Space
+   на нём — подтверждение; откат для клавиатурных шагов не делаем.
    ============================================================ */
-var SLIDE_LABEL = "Проведите вправо, чтобы отправить";
+var SLIDE_TEXT = {
+  hint:    "Проведите вправо, чтобы отправить",
+  aria:    "Проведите вправо, чтобы отправить заявку",
+  sending: "Отправляем…"
+};
+var SWIPE_MIN_SAMPLES = 3;   // минимум отсчётов движения
+var SWIPE_MIN_MS = 100;      // минимум длительности жеста
+var SWIPE_DONE_AT = 97;      // порог «доведён до конца», %
+
 function createSlideConfirm(form, submitBtn, onConfirm) {
   var wrap = document.createElement("div");
   wrap.className = "slide-confirm";
@@ -239,42 +294,55 @@ function createSlideConfirm(form, submitBtn, onConfirm) {
   range.type = "range";
   range.className = "slide-confirm__range";
   range.min = "0"; range.max = "100"; range.step = "1"; range.value = "0";
-  range.setAttribute("aria-label", "Проведите вправо, чтобы отправить заявку");
+  range.setAttribute("aria-label", SLIDE_TEXT.aria);
 
   var label = document.createElement("span");
   label.className = "slide-confirm__label";
-  label.textContent = SLIDE_LABEL;
+  label.textContent = SLIDE_TEXT.hint;
 
   wrap.appendChild(range);
   wrap.appendChild(label);
-  form.appendChild(wrap);
+  // Ставим сразу под кнопкой (в hero кнопка внутри .field-row — тогда под всей строкой),
+  // чтобы слайдер появлялся ровно там, куда смотрит человек, а не в конце формы.
+  var anchor = submitBtn ? (submitBtn.closest(".field-row") || submitBtn) : null;
+  if (anchor && anchor.parentNode) anchor.insertAdjacentElement("afterend", wrap);
+  else form.appendChild(wrap);
 
   var confirmed = false;
-  var lastV = 0;                    // последнее «честное» положение ползунка
-  var rafId = null, animating = false;
+  var rafId = null;
+  var gesture = { start: 0, samples: 0, viaKey: false };
+  var now = function () { return (window.performance && performance.now) ? performance.now() : Date.now(); };
+  // Экранные читалки (VoiceOver/TalkBack) двигают ползунок без pointer/keyboard-событий:
+  // приходят только input/change. Такое ведение считаем осознанным и не откатываем.
+  var isAssistive = function () { return !gesture.start && !gesture.viaKey; };
+  var swipeDone = function () {
+    return (Number(range.value) || 0) >= SWIPE_DONE_AT &&
+      (gesture.viaKey || isAssistive() ||
+       (gesture.samples >= SWIPE_MIN_SAMPLES && (now() - gesture.start) >= SWIPE_MIN_MS));
+  };
+
   // --p — заливка дорожки (в %), --pn — то же число без единиц (для затухания подписи).
   function setFill(v) { wrap.style.setProperty("--p", v + "%"); wrap.style.setProperty("--pn", String(v)); }
 
   function stopAnim() {
     if (rafId !== null && window.cancelAnimationFrame) cancelAnimationFrame(rafId);
-    rafId = null; animating = false;
+    rafId = null;
   }
 
   // Плавный откат в начало (value у range через CSS не анимируется — ведём вручную).
   function animateBack() {
     stopAnim();
     var from = Number(range.value) || 0;
-    if (!from || !window.requestAnimationFrame) { range.value = "0"; setFill(0); lastV = 0; return; }
+    if (!from || !window.requestAnimationFrame) { range.value = "0"; setFill(0); return; }
     var dur = 240, start = null;
-    animating = true;
     function step(t) {
       if (start === null) start = t;
       var k = Math.min(1, (t - start) / dur);
       var e = 1 - Math.pow(1 - k, 3); // ease-out
       var v = Math.round(from * (1 - e));
-      range.value = String(v); setFill(v); lastV = v;
+      range.value = String(v); setFill(v);
       if (k < 1) { rafId = requestAnimationFrame(step); }
-      else { rafId = null; animating = false; lastV = 0; }
+      else { rafId = null; }
     }
     rafId = requestAnimationFrame(step);
   }
@@ -282,20 +350,27 @@ function createSlideConfirm(form, submitBtn, onConfirm) {
   function reset() {
     stopAnim();
     confirmed = false;
+    gesture = { start: 0, samples: 0, viaKey: false };
     range.disabled = false;
-    range.value = "0"; setFill(0); lastV = 0;
+    range.value = "0"; setFill(0);
     wrap.classList.remove("is-confirmed");
-    label.textContent = SLIDE_LABEL;
+    label.textContent = SLIDE_TEXT.hint;
     wrap.hidden = true;
-    if (submitBtn) submitBtn.hidden = false;
+    if (submitBtn) { submitBtn.hidden = false; submitBtn.disabled = false; submitBtn.removeAttribute("aria-busy"); }
   }
 
   function show() {
     if (confirmed) return;
     stopAnim();
-    range.value = "0"; setFill(0); lastV = 0;
+    gesture = { start: 0, samples: 0, viaKey: false };
+    range.value = "0"; setFill(0);
     wrap.hidden = false;
     if (submitBtn) submitBtn.hidden = true;
+    // Фокус — на ползунок: на телефоне это закрывает клавиатуру (иначе она перекрывает слайдер),
+    // с клавиатуры можно сразу вести стрелками / подтвердить Enter.
+    try { range.focus({ preventScroll: true }); } catch (e) { try { range.focus(); } catch (e2) {} }
+    // Показываем целиком (в модалке не скроллим — она фиксирована и сама помещается на экран).
+    try { if (!wrap.closest(".modal") && wrap.scrollIntoView) wrap.scrollIntoView({ block: "nearest", behavior: "smooth" }); } catch (e) {}
   }
 
   function complete() {
@@ -305,33 +380,46 @@ function createSlideConfirm(form, submitBtn, onConfirm) {
     range.value = "100"; setFill(100);
     range.disabled = true;
     wrap.classList.add("is-confirmed");
-    label.textContent = "Отправляем…";
+    label.textContent = SLIDE_TEXT.sending;
     try { if (navigator.vibrate) navigator.vibrate(12); } catch (e) {} // лёгкий отклик (Android)
     onConfirm(reset);
   }
 
-  // Взялись за ползунок во время отката — откат прерывается, точка отсчёта = текущее положение.
-  ["pointerdown", "touchstart", "mousedown", "keydown"].forEach(function (evt) {
+  // Начало жеста: точка отсчёта времени и счётчик движений; откат прерывается.
+  // pointerdown — основной; touchstart/mousedown — запасные для старых браузеров
+  // (если pointerdown уже был < 50 мс назад, повторно жест не сбрасываем).
+  ["pointerdown", "touchstart", "mousedown"].forEach(function (evt) {
     range.addEventListener(evt, function () {
-      if (animating) { stopAnim(); lastV = Number(range.value) || 0; }
+      if (confirmed) return;
+      stopAnim();
+      if (gesture.start && now() - gesture.start < 50) return;
+      gesture = { start: now(), samples: 0, viaKey: false };
     }, { passive: true });
+  });
+
+  // Клавиатура: шаги стрелками не откатываем; Enter / Space — подтверждение.
+  range.addEventListener("keydown", function (e) {
+    if (confirmed) return;
+    stopAnim();
+    gesture.viaKey = true;
+    if (e.key === "Enter" || e.key === " " || e.key === "Spacebar") { e.preventDefault(); complete(); }
   });
 
   range.addEventListener("input", function () {
     if (confirmed) return;
-    var v = Number(range.value) || 0;
-    // Защита от «телепорта»: одиночный клик по дорожке (в т.ч. по правому
-    // краю) скачком меняет значение — это не свайп, откатываем. Настоящее
-    // ведение даёт плавную серию небольших приращений.
-    if (v - lastV > 45) { range.value = String(lastV); setFill(lastV); return; }
-    lastV = v;
-    setFill(v);
-    if (v >= 97) complete();
+    gesture.samples += 1;
+    setFill(Number(range.value) || 0);
+    if (swipeDone()) complete();
+    // иначе — тап/телепорт или ещё слишком рано: решим при отпускании
   });
-  // Отпустили раньше конца — ползунок плавно возвращается в начало.
-  ["change", "pointerup", "touchend", "mouseup"].forEach(function (evt) {
+
+  // Отпустили. Быстрый флик до упора (значение «залипло» на 100, новых input нет) —
+  // проверяем ещё раз здесь; иначе плавно возвращаем в начало.
+  ["change", "pointerup", "pointercancel", "lostpointercapture", "touchend", "touchcancel", "mouseup"].forEach(function (evt) {
     range.addEventListener(evt, function () {
-      if (!confirmed && Number(range.value) < 97) animateBack();
+      if (confirmed || gesture.viaKey || isAssistive()) return;
+      if (swipeDone()) { complete(); return; }
+      animateBack();
     });
   });
 
@@ -353,6 +441,7 @@ function bindLeadForm(form) {
   var loc = form.getAttribute("data-form-location") || "form";
   var submitBtn = form.querySelector('button[type="submit"]');
   var honeypot = form.querySelector('[name="website"]'); // антиспам-ловушка
+  var submitting = false; // после подтверждения свайпом форма «заморожена» до редиректа
 
   function showError() {
     input.classList.add("is-invalid");
@@ -364,6 +453,7 @@ function bindLeadForm(form) {
   // Финальная отправка — только после свайпа. Контакт могли изменить,
   // пока ползунок был на экране, поэтому проверяем ещё раз.
   var slider = createSlideConfirm(form, submitBtn, function (resetSlider) {
+    if (submitting) return;
     if (honeypot && honeypot.value) { resetSlider(); return; }
     if (!validateContact(input.value)) {
       resetSlider();
@@ -371,11 +461,13 @@ function bindLeadForm(form) {
       input.focus();
       return;
     }
+    submitting = true;
     if (submitBtn) { submitBtn.disabled = true; submitBtn.setAttribute("aria-busy", "true"); }
     submitLead(input.value.trim(), loc);
   });
 
   input.addEventListener("input", function () {
+    if (submitting) return;
     if (!firedOnce("form_start:" + loc)) {
       trackEvent("form_start", { page: "index", form_location: loc, funnel_step: "lead_form" });
     }
@@ -388,12 +480,14 @@ function bindLeadForm(form) {
 
   if (submitBtn) {
     submitBtn.addEventListener("click", function () {
+      if (submitting) return;
       trackEvent("click_primary_cta", { page: "index", cta_location: loc, funnel_step: "lead_form" });
     });
   }
 
   form.addEventListener("submit", function (e) {
     e.preventDefault();
+    if (submitting) return;
     if (honeypot && honeypot.value) return; // honeypot заполнен — бот, тихо игнорируем
     if (!validateContact(input.value)) {
       showError();
@@ -469,7 +563,7 @@ function initContactGate() {
     if (e.key === "Escape") { close(); return; }
     // Фокус-ловушка: Tab / Shift+Tab циклятся внутри pop-up.
     if (e.key === "Tab") {
-      var f = modal.querySelectorAll('button:not([disabled]), input:not([disabled]), a[href], [tabindex]:not([tabindex="-1"])');
+      var f = modal.querySelectorAll('button:not([disabled]):not([hidden]), input:not([disabled]):not([hidden]), a[href], [tabindex]:not([tabindex="-1"])');
       if (!f.length) return;
       var first = f[0], last = f[f.length - 1];
       if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus(); }
@@ -600,6 +694,9 @@ document.addEventListener("DOMContentLoaded", function () {
     // Анти-бот токен: берём при загрузке (заодно «прогревает» функцию) и обновляем фоном.
     fetchLeadToken();
     setInterval(fetchLeadToken, LEAD_TOKEN_REFRESH_MS);
+    // Вернулись кнопкой «Назад» из bfcache — страница восстановилась в состоянии «Отправляем…».
+    // Перезагружаем, чтобы форма и токен были чистыми.
+    window.addEventListener("pageshow", function (e) { if (e.persisted) location.reload(); });
   }
 
   if (page === "thank-you") {

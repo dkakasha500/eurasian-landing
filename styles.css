@@ -682,6 +682,12 @@ body.modal-open .floating { opacity: 0; pointer-events: none; }
   padding: 30px 28px 26px;
   box-shadow: var(--sh-3);
   animation: modal-pop .22s cubic-bezier(.22,.61,.36,1);
+  /* На маленьком экране с открытой клавиатурой диалог не должен вылезать за viewport:
+     ограничиваем высоту и даём внутренний скролл (dvh учитывает панели мобильного браузера). */
+  max-height: calc(100vh - 32px);
+  max-height: calc(100dvh - 32px);
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
 }
 .modal__close {
   position: absolute; top: 12px; right: 12px;
@@ -731,6 +737,9 @@ body.modal-open { overflow: hidden; }
   animation: slide-confirm-in 0.22s ease-out both; /* мягкое появление на месте кнопки */
 }
 .slide-confirm[hidden] { display: none; }
+/* Кнопка отправки на время показа слайдера. Без этого правила .btn { display:inline-flex }
+   перебил бы браузерное [hidden] { display:none } — кнопка и слайдер были бы видны вместе. */
+.lead-form button[type="submit"][hidden] { display: none; }
 @keyframes slide-confirm-in {
   from { opacity: 0; transform: translateY(6px); }
   to   { opacity: 1; transform: translateY(0); }
@@ -743,14 +752,14 @@ body.modal-open { overflow: hidden; }
   width: 100%;
   height: 54px;
   margin: 0;
-  border: 1px solid var(--line);
+  border: 1px solid var(--line, #e5eaf1);
   border-radius: 27px;
-  background: linear-gradient(to right, var(--accent-tint) 0 var(--p), #f0f4fa var(--p) 100%);
+  background: linear-gradient(to right, var(--accent-tint, #e7eefe) 0 var(--p), #f0f4fa var(--p) 100%);
   cursor: pointer;
   touch-action: none; /* страница не скроллится, пока ведут ползунок */
 }
 .slide-confirm__range:focus-visible {
-  outline: 3px solid var(--ring);
+  outline: 3px solid var(--ring, rgba(47, 99, 230, 0.26));
   outline-offset: 2px;
 }
 
@@ -768,7 +777,7 @@ body.modal-open { overflow: hidden; }
   margin-top: 3px;
   border: none;
   border-radius: 50%;
-  background: var(--primary)
+  background: var(--primary, #2f63e6)
     url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23ffffff' stroke-width='2.4' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M5 12h14M13 6l6 6-6 6'/%3E%3C/svg%3E")
     center / 22px 22px no-repeat;
   box-shadow: 0 2px 10px rgba(31, 71, 173, 0.35);
@@ -787,7 +796,7 @@ body.modal-open { overflow: hidden; }
   height: 46px;
   border: none;
   border-radius: 50%;
-  background: var(--primary)
+  background: var(--primary, #2f63e6)
     url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23ffffff' stroke-width='2.4' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M5 12h14M13 6l6 6-6 6'/%3E%3C/svg%3E")
     center / 22px 22px no-repeat;
   box-shadow: 0 2px 10px rgba(31, 71, 173, 0.35);
@@ -810,8 +819,8 @@ body.modal-open { overflow: hidden; }
   /* Подпись тает по мере ведения: к ~55% исчезает полностью — видно заливку, а не бегунок поверх букв. */
   opacity: calc(1 - var(--pn) / 55);
   /* Бегущий блик по тексту — подсказка «это надо провести, а не нажать». */
-  color: var(--slate);
-  background: linear-gradient(90deg, var(--slate) 0%, var(--slate) 42%, var(--primary) 50%, var(--slate) 58%, var(--slate) 100%);
+  color: var(--slate, #46546b);
+  background: linear-gradient(90deg, var(--slate, #46546b) 0%, var(--slate, #46546b) 42%, var(--primary, #2f63e6) 50%, var(--slate, #46546b) 58%, var(--slate, #46546b) 100%);
   background-size: 220% 100%;
   -webkit-background-clip: text;
   background-clip: text;
@@ -825,8 +834,8 @@ body.modal-open { overflow: hidden; }
 
 /* Завершение: дорожка целиком синяя, в бегунке — галочка, подпись «Отправляем…». */
 .slide-confirm.is-confirmed .slide-confirm__range {
-  background: var(--primary);
-  border-color: var(--primary);
+  background: var(--primary, #2f63e6);
+  border-color: var(--primary, #2f63e6);
 }
 .slide-confirm.is-confirmed .slide-confirm__range::-webkit-slider-thumb {
   background-color: #ffffff;
@@ -852,7 +861,7 @@ body.modal-open { overflow: hidden; }
   .slide-confirm__label {
     animation: none;
     background: none;
-    color: var(--slate);
-    -webkit-text-fill-color: var(--slate);
+    color: var(--slate, #46546b);
+    -webkit-text-fill-color: var(--slate, #46546b);
   }
 }

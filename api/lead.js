@@ -63,9 +63,83 @@ function verifyToken(token) {
 /* Запрос пришёл с нашего же домена? Отклоняем только явное несовпадение. */
 function sameSite(req) {
   const host = String(req.headers.host || "").toLowerCase();
-  const src = req.headers.origin || req.headers.referer || "";
+  let src = req.headers.origin || req.headers.referer || "";
+  if (src === "null") src = req.headers.referer || ""; // приватные режимы шлют Origin: null
   if (!src) return true; // браузер не прислал заголовков — решает токен
   try { return new URL(src).host.toLowerCase() === host; } catch (e) { return false; }
+}
+
+/* Нормализация контакта. Правило то же, что у клиента (validateContact):
+   телефон ≥ 9 цифр ИЛИ любой текст ≥ 3 символов — сервер НИКОГДА не отбрасывает
+   то, что уже принял клиент (иначе человек увидит «спасибо», а лид пропадёт).
+   Управляющие/невидимые/bidi-символы вырезаем, пробелы схлопываем.
+
+   Телефоны: «+» подставляем только там, где уверены в коде страны:
+     • ≥ 11 цифр без «+»  → «+» + цифры как есть  (998901234567 → +998901234567)
+     • ровно LOCAL_PHONE_DIGITS цифр без кода → «+» + DEFAULT_COUNTRY_CODE + цифры
+                                                (901234567 → +998901234567)
+     • иначе оставляем как ввели (не выдумываем код страны). */
+const DEFAULT_COUNTRY_CODE = "998"; // Узбекистан; при переносе на другой сайт — поменять
+const LOCAL_PHONE_DIGITS = 9;       // длина местного номера без кода страны
+function cleanContact(raw) {
+  let v = String(raw || "")
+    .replace(/[\p{Cc}\p{Cf}]/gu, "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 120);
+  if (v.length < 3) return null;
+  if (/^[+\d][\d\s\-()]*$/.test(v)) {
+    const digits = v.replace(/\D/g, "");
+    if (digits.length < 9) return null;
+    if (!v.startsWith("+")) {
+      if (digits.length >= 11) v = "+" + v.replace(/^\s+/, "");
+      else if (digits.length === LOCAL_PHONE_DIGITS) v = "+" + DEFAULT_COUNTRY_CODE + " " + v;
+    }
+    return v;
+  }
+  if (v.replace(/^@+/, "").length < 3) return null; // как на клиенте: «@ab» — слишком коротко
+  return v; // Telegram-хэндл, имя + телефон, ссылка t.me — как есть
+}
+/* Ключ дедупликации: для телефонов — только цифры (+998 90 123 45 67 = +998901234567). */
+function dedupeKey(contact) {
+  return /^[+\d][\d\s\-()]*$/.test(contact) ? contact.replace(/\D/g, "") : contact.toLowerCase();
+}
+
+/* Лимиты (best-effort, в памяти тёплого инстанса функции):
+   • тот же контакт повторно в течение 10 мин — в группу не дублируем;
+   • > 20 лидов с одного IP за 10 мин — 429.
+   Это не замена WAF (инстансов может быть несколько), но режет наивный спам
+   и случайные повторные отправки. Для настоящего флуда — Vercel Firewall. */
+const WINDOW_MS = 10 * 60e3, IP_LIMIT = 20; // 20/10 мин: мобильные операторы сажают тысячи людей за один IP
+const recentContacts = new Map(); // dedupeKey(contact) → ts
+const ipHits = new Map();         // ip → [ts, ...]
+function prune(now) {
+  for (const [k, ts] of recentContacts) if (now - ts > WINDOW_MS) recentContacts.delete(k);
+  for (const [k, arr] of ipHits) { const a = arr.filter(t => now - t <= WINDOW_MS); a.length ? ipHits.set(k, a) : ipHits.delete(k); }
+}
+function clientIp(req) {
+  const xf = String(req.headers["x-forwarded-for"] || "").split(",")[0].trim();
+  return xf || String(req.headers["x-real-ip"] || "") || "unknown";
+}
+
+/* Отправка в Telegram с одним повтором (429 / 5xx / сеть). */
+async function sendTelegram(token, payload) {
+  let last = "send_failed";
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      const tg = await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
+        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload),
+        signal: AbortSignal.timeout(2500) // не висим до maxDuration функции
+      });
+      const j = await tg.json().catch(() => ({}));
+      if (j && j.ok) return null;
+      last = "telegram_error";
+      const retryable = tg.status === 429 || tg.status >= 500;
+      if (!retryable) return last;
+    } catch (e) { last = "send_failed"; }
+    await new Promise(r => setTimeout(r, 700));
+  }
+  return last;
 }
 
 /* Время по Алматы. Основной путь — Intl с таймзоной; запасной — фикс. UTC+5
@@ -88,7 +162,7 @@ function contactLink(contact) {
   var phoneLike = /^[+\d][\d\s\-()]*$/.test(v);
   if (phoneLike) {
     var digits = v.replace(/\D/g, "");
-    return digits ? "https://t.me/+" + digits : null;
+    return digits.length >= 11 ? "https://t.me/+" + digits : null; // без кода страны ссылка бессмысленна
   }
   var handle = v.replace(/^@+/, "").replace(/[^A-Za-z0-9_]/g, "");
   return handle ? "https://t.me/" + handle : null;
@@ -103,7 +177,7 @@ module.exports = async function handler(req, res) {
   if (!TOKEN || !CHAT_ID) return res.status(500).json({ ok: false, error: "not_configured" });
 
   // Выдача анти-бот токена (страница запрашивает при загрузке и обновляет раз в 40 мин).
-  if (req.method === "GET") return res.status(200).json({ ok: true, token: signToken(Date.now()) });
+  if (req.method === "GET") return res.status(200).json({ ok: true, token: signToken(Date.now()), minAge: TOKEN_MIN_AGE_MS });
   if (req.method !== "POST") return res.status(405).json({ ok: false, error: "method_not_allowed" });
 
   // Тело может прийти строкой (sendBeacon) или объектом (fetch JSON).
@@ -114,16 +188,26 @@ module.exports = async function handler(req, res) {
   // Honeypot: скрытое поле заполнено — бот, тихо отвечаем ok.
   if (data.website) return res.status(200).json({ ok: true, skipped: "honeypot" });
 
+  const contact = cleanContact(data.contact);
+  const ip = clientIp(req);
+  // Любой отказ — в логи функции (Vercel → Logs): лид не пропадает бесследно.
+  const reject = (code, error) => {
+    console.warn("LEAD_REJECTED " + JSON.stringify({ error, contact: contact || String(data.contact || "").slice(0, 120), ip, at: new Date().toISOString() }));
+    return res.status(code).json({ ok: false, error });
+  };
+
   // Анти-бот: тот же домен + валидный, «выдержанный» токен.
-  if (!sameSite(req)) return res.status(403).json({ ok: false, error: "bad_origin" });
+  if (!sameSite(req)) return reject(403, "bad_origin");
   const tokenError = verifyToken(data.token);
-  if (tokenError) return res.status(403).json({ ok: false, error: tokenError });
+  if (tokenError) return reject(403, tokenError);
+  if (!contact) return reject(400, "no_contact");
 
-  let contact = String(data.contact || "").trim().slice(0, 120);
-  if (!contact) return res.status(400).json({ ok: false, error: "no_contact" });
-
-  // Телефон без "+" в начале — добавляем "+" сами (единый вид: +996036730).
-  if (/^\d[\d\s\-()]*$/.test(contact)) contact = "+" + contact;
+  const now = Date.now();
+  prune(now);
+  const hits = ipHits.get(ip) || [];
+  if (hits.length >= IP_LIMIT) return reject(429, "rate_limited");
+  const key = dedupeKey(contact);
+  if (recentContacts.has(key)) return res.status(200).json({ ok: true, skipped: "duplicate" });
 
   const text =
     "🟦 Новый лид (B2B, Узбекистан)\n" +
@@ -142,18 +226,15 @@ module.exports = async function handler(req, res) {
     };
   }
 
-  try {
-    const tg = await fetch(`https://api.telegram.org/bot${TOKEN}/sendMessage`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(payload)
-    });
-    const j = await tg.json();
-    if (!j.ok) return res.status(502).json({ ok: false, error: "telegram_error", detail: j.description });
-    return res.status(200).json({ ok: true });
-  } catch (e) {
-    return res.status(502).json({ ok: false, error: "send_failed" });
+  const err = await sendTelegram(TOKEN, payload);
+  if (err) {
+    // Лид не пропадает бесследно: контакт остаётся в логах функции (Vercel → Logs).
+    console.error("LEAD_NOT_DELIVERED " + JSON.stringify({ contact, form: data.form_location || "", at: new Date().toISOString(), error: err }));
+    return res.status(502).json({ ok: false, error: err });
   }
+  hits.push(now); ipHits.set(ip, hits);
+  recentContacts.set(key, now);
+  return res.status(200).json({ ok: true });
 };
 
 // Для автотестов: подпись токена с произвольной временной меткой.
